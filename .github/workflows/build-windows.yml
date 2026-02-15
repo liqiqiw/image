@@ -1,0 +1,30 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Download pose model
+        run: |
+          curl -L -o pose_landmarker.task "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
+
+      - name: Build EXE
+        run: uv run pyinstaller build_exe.spec --clean
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: CropPortrait-Windows
+          path: dist/*.exe
