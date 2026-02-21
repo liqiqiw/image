@@ -1,6 +1,7 @@
 """
 人像照片智能裁剪工具 - GUI 版本
 通过临时日志文件与 worker 子进程通信，避免 stdout 被 MediaPipe 污染。
+打包后通过 --worker 参数让 exe 以 worker 模式启动子进程。
 """
 
 import os
@@ -25,7 +26,7 @@ class CropPortraitGUI:
         self.src_dir = tk.StringVar(value=str(Path.home() / "Desktop" / "imageSrc"))
         self.out_dir = tk.StringVar(value=str(Path.home() / "Desktop" / "imageOut"))
         self.padding_top = tk.StringVar(value="10")
-        self.padding_bottom = tk.StringVar(value="3")
+        self.padding_bottom = tk.StringVar(value="2")
         self.padding_left = tk.StringVar(value="0")
         self.padding_right = tk.StringVar(value="0")
         self.auto_level = tk.BooleanVar(value=False)
@@ -58,10 +59,9 @@ class CropPortraitGUI:
             tk.Label(pf, text=label, width=6).grid(row=row, column=col * 2)
             tk.Entry(pf, textvariable=var, width=8).grid(row=row, column=col * 2 + 1, padx=5, pady=2)
 
-        # 水平矫正开关
         f_opt = tk.Frame(self.root, padx=10, pady=5)
         f_opt.pack(fill=tk.X)
-        tk.Checkbutton(f_opt, text="启用水平矫正（基于人体自动校正倾斜）",
+        tk.Checkbutton(f_opt, text="启用水平矫正（基于图像直线检测自动校正倾斜）",
                        variable=self.auto_level, font=('Arial', 10)).pack(anchor='w')
 
         f4 = tk.Frame(self.root, padx=10, pady=10)
@@ -132,14 +132,17 @@ class CropPortraitGUI:
             "auto_level": self.auto_level.get(),
         })
 
-        py = sys.executable
-        worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crop_worker.py")
+        # 关键：打包后用 exe 自身 + --worker 参数启动子进程
+        # 开发时用 python + crop_worker.py
         if getattr(sys, 'frozen', False):
-            worker = os.path.join(sys._MEIPASS, "crop_worker.py")
+            cmd = [sys.executable, "--worker", self.log_file, params]
+        else:
+            py = sys.executable
+            worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crop_worker.py")
+            cmd = [py, worker, self.log_file, params]
 
         self.worker_proc = subprocess.Popen(
-            [py, worker, self.log_file, params],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         self.poll_log_file()
 
@@ -228,7 +231,18 @@ class CropPortraitGUI:
                 pass
 
 
-if __name__ == "__main__":
+def main_gui():
     root = tk.Tk()
     app = CropPortraitGUI(root)
     root.mainloop()
+
+
+if __name__ == "__main__":
+    # 打包后通过 --worker 参数区分 GUI 模式和 Worker 模式
+    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        # Worker 模式: 参数为 --worker <log_file> <params_json>
+        sys.argv = [sys.argv[0]] + sys.argv[2:]  # 去掉 --worker，让 worker 的 argv[1] argv[2] 正确
+        from crop_worker import main as worker_main
+        worker_main()
+    else:
+        main_gui()
