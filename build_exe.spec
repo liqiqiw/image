@@ -3,10 +3,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
-# 收集 mediapipe 的所有文件（包括 C 绑定、模型等）
 mp_datas, mp_binaries, mp_hiddenimports = collect_all('mediapipe')
-
-# 收集 opencv 的所有文件
 cv2_datas, cv2_binaries, cv2_hiddenimports = collect_all('cv2')
 
 a = Analysis(
@@ -43,7 +40,12 @@ exe = EXE(
     [],
     name='autoCut',
     debug=False,
-    bootloader_ign
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
