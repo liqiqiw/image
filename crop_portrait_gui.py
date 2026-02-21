@@ -17,17 +17,18 @@ class CropPortraitGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("人像照片智能裁剪工具")
-        self.root.geometry("700x650")
+        self.root.geometry("700x680")
         self.worker_proc = None
         self.is_running = False
         self.log_file = None
         self.log_pos = 0
         self.src_dir = tk.StringVar(value=str(Path.home() / "Desktop" / "imageSrc"))
         self.out_dir = tk.StringVar(value=str(Path.home() / "Desktop" / "imageOut"))
-        self.padding_top = tk.StringVar(value="15")
-        self.padding_bottom = tk.StringVar(value="5")
-        self.padding_left = tk.StringVar(value="5")
-        self.padding_right = tk.StringVar(value="5")
+        self.padding_top = tk.StringVar(value="10")
+        self.padding_bottom = tk.StringVar(value="3")
+        self.padding_left = tk.StringVar(value="0")
+        self.padding_right = tk.StringVar(value="0")
+        self.auto_level = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="就绪")
         self.setup_ui()
 
@@ -57,6 +58,12 @@ class CropPortraitGUI:
             tk.Label(pf, text=label, width=6).grid(row=row, column=col * 2)
             tk.Entry(pf, textvariable=var, width=8).grid(row=row, column=col * 2 + 1, padx=5, pady=2)
 
+        # 水平矫正开关
+        f_opt = tk.Frame(self.root, padx=10, pady=5)
+        f_opt.pack(fill=tk.X)
+        tk.Checkbutton(f_opt, text="启用水平矫正（基于人体自动校正倾斜）",
+                       variable=self.auto_level, font=('Arial', 10)).pack(anchor='w')
+
         f4 = tk.Frame(self.root, padx=10, pady=10)
         f4.pack(fill=tk.X)
         self.btn_start = tk.Button(
@@ -75,7 +82,7 @@ class CropPortraitGUI:
         f5 = tk.Frame(self.root, padx=10, pady=5)
         f5.pack(fill=tk.BOTH, expand=True)
         tk.Label(f5, text="执行日志:", font=('Arial', 10, 'bold')).pack(anchor='w')
-        self.log_text = scrolledtext.ScrolledText(f5, height=18, width=80, font=('Consolas', 9))
+        self.log_text = scrolledtext.ScrolledText(f5, height=16, width=80, font=('Consolas', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=5)
 
     def browse_src(self):
@@ -122,6 +129,7 @@ class CropPortraitGUI:
         params = json.dumps({
             "src_dir": src, "out_dir": self.out_dir.get(),
             "pad_top": pt, "pad_bottom": pb, "pad_left": pl, "pad_right": pr,
+            "auto_level": self.auto_level.get(),
         })
 
         py = sys.executable
@@ -155,11 +163,14 @@ class CropPortraitGUI:
                         if t == "log":
                             self.log(msg["msg"])
                         elif t == "progress":
-                            c, tot, fn, st = msg["current"], msg["total"], msg["filename"], msg["status"]
+                            c, tot = msg["current"], msg["total"]
+                            fn, st = msg["filename"], msg["status"]
                             self.log(f"[{c}/{tot}] {fn} - {st}")
                             self.status_var.set(f"处理中: {c}/{tot} - {fn}")
                         elif t == "done":
-                            self.status_var.set(f"完成! 成功 {msg.get('success',0)}/{msg.get('total',0)} 张")
+                            s = msg.get('success', 0)
+                            tot = msg.get('total', 0)
+                            self.status_var.set(f"完成! 成功 {s}/{tot} 张")
                             done = True
                     except json.JSONDecodeError:
                         pass
@@ -171,7 +182,6 @@ class CropPortraitGUI:
             return
 
         if self.worker_proc and self.worker_proc.poll() is not None:
-            # 进程退出，最后读一次
             try:
                 with open(self.log_file, 'r', encoding='utf-8') as f:
                     f.seek(self.log_pos)
@@ -187,7 +197,9 @@ class CropPortraitGUI:
                         elif t == "progress":
                             self.log(f"[{msg['current']}/{msg['total']}] {msg['filename']} - {msg['status']}")
                         elif t == "done":
-                            self.status_var.set(f"完成! 成功 {msg.get('success',0)}/{msg.get('total',0)} 张")
+                            s = msg.get('success', 0)
+                            tot = msg.get('total', 0)
+                            self.status_var.set(f"完成! 成功 {s}/{tot} 张")
                     except json.JSONDecodeError:
                         pass
             except FileNotFoundError:
