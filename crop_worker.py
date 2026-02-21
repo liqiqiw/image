@@ -29,6 +29,11 @@ LOG_FILE = sys.argv[1]
 # 水平矫正：使用人体中轴线（头顶到双脚中点）判断垂直方向
 
 
+import time
+
+RESPONSE_FILE = None
+
+
 def get_model_path():
     if getattr(sys, 'frozen', False):
         return os.path.join(sys._MEIPASS, "pose_landmarker.task")
@@ -40,6 +45,29 @@ def emit(msg_type, **kwargs):
     data.update(kwargs)
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def request_preview(filepath, crop_box, img_w, img_h):
+    """发送预览请求并等待 GUI 返回用户调整后的裁剪框"""
+    emit("preview_request", filepath=filepath,
+         crop_box=list(crop_box), img_w=img_w, img_h=img_h)
+    # 轮询响应文件
+    while True:
+        if RESPONSE_FILE and os.path.exists(RESPONSE_FILE):
+            try:
+                with open(RESPONSE_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                if content:
+                    os.remove(RESPONSE_FILE)
+                    resp = json.loads(content)
+                    if resp.get("action") == "confirm":
+                        box = resp["crop_box"]
+                        return tuple(box)
+                    elif resp.get("action") == "skip":
+                        return None
+            except (json.JSONDecodeError, OSError):
+                pass
+        time.sleep(0.1)
 
 
 def compute_body_tilt(landmarks):
@@ -123,6 +151,7 @@ def compute_crop_box(img_w, img_h, bbox, pad_top, pad_bottom, pad_left, pad_righ
 
 
 def fallback_center_crop(img_w, img_h):
+    """普通模式未检测到人体时，居中裁剪 3:4"""
     if img_w / img_h > TARGET_RATIO:
         crop_h = img_h
         crop_w = int(crop_h * TARGET_RATIO)
@@ -134,7 +163,95 @@ def fallback_center_crop(img_w, img_h):
     return left, top, left + crop_w, top + crop_h
 
 
+
+def fallback_lower_crop(img_w, img_h):
+    """膝盖到脚模式的 fallback：根据比例取画面中心区域"""
+    if TARGET_RATIO == 1.0:
+        # 1:1 模式取中间 2400x2400，向下偏移200
+        crop_size = min(2400, img_w, img_h)
+        left = (img_w - crop_size) // 2
+        top = (img_h - crop_size) // 2 + 200
+        if top + crop_size > img_h:
+            top = img_h - crop_size
+        if top < 0:
+            top = 0
+        return left, top, left + crop_size, top + crop_size
+    else:
+        # 3:4 模式取中心偏下 2400x3200
+        crop_w = min(TARGET_W * 2, img_w)
+        crop_h = min(TARGET_H * 2, img_h)
+        if crop_w / crop_h > TARGET_RATIO:
+            crop_w = int(crop_h * TARGET_RATIO)
+        else:
+            crop_h = int(crop_w / TARGET_RATIO)
+        left = (img_w - crop_w) // 2
+        top = (img_h - crop_h) // 2 + 200
+        if top + crop_h > img_h:
+            top = img_h - crop_h
+        if top < 0:
+            top = 0
+        return left, top, left + crop_w, top + crop_h
+
+
+def compute_knee_foot_crop(img_w, img_h, landmarks, pad_top, pad_bottom, pad_left, pad_right):
+    """
+    膝盖到脚模式：以脚踝到脚尖区域为基准，加留白后居中裁切 3:4。
+    landmark 27=左脚踝, 28=右脚踝, 31=左脚尖, 32=右脚尖
+    """
+    ankle_l, ankle_r = landmarks[27], landmarks[28]
+    toe_l, toe_r = landmarks[31], landmarks[32]
+
+    foot_xs = [ankle_l.x, ankle_r.x, toe_l.x, toe_r.x]
+    foot_ys = [ankle_l.y, ankle_r.y, toe_l.y, toe_r.y]
+
+    region_x_min = min(foot_xs) * img_w
+    region_x_max = max(foot_xs) * img_w
+    region_y_min = min(foot_ys) * img_h
+    region_y_max = max(foot_ys) * img_h
+
+    region_w = region_x_max - region_x_min
+    region_h = region_y_max - region_y_min
+
+    # 加留白
+    want_left = region_x_min - region_w * pad_left
+    want_right = region_x_max + region_w * pad_right
+    want_top = region_y_min - region_h * pad_top
+    want_bottom = region_y_max + region_h * pad_bottom
+
+    want_w = want_right - want_left
+    want_h = want_bottom - want_top
+    cx = (want_left + want_right) / 2
+    cy = (want_top + want_bottom) / 2
+
+    # 按 3:4 比例扩展
+    if want_w / want_h > TARGET_RATIO:
+        crop_w = want_w
+        crop_h = crop_w / TARGET_RATIO
+    else:
+        crop_h = want_h
+        crop_w = crop_h * TARGET_RATIO
+
+    # 居中裁切
+    left = cx - crop_w / 2
+    top = cy - crop_h / 2
+    right = cx + crop_w / 2
+    bottom = cy + crop_h / 2
+
+    # 边界修正
+    if left < 0:
+        right -= left; left = 0
+    if right > img_w:
+        left -= (right - img_w); right = img_w
+    if top < 0:
+        bottom -= top; top = 0
+    if bottom > img_h:
+        top -= (bottom - img_h); bottom = img_h
+
+    return int(max(0, left)), int(max(0, top)), int(min(img_w, right)), int(min(img_h, bottom))
+
+
 def main():
+    global RESPONSE_FILE, TARGET_W, TARGET_H, TARGET_RATIO
     params = json.loads(sys.argv[2])
     src_dir = params["src_dir"]
     out_dir = params["out_dir"]
@@ -143,6 +260,17 @@ def main():
     pad_left = params["pad_left"]
     pad_right = params["pad_right"]
     auto_level = params.get("auto_level", False)
+    knee_foot_mode = params.get("knee_foot_mode", False)
+    crop_ratio = params.get("crop_ratio", "3:4")
+    RESPONSE_FILE = params.get("response_file", None)
+
+    # 根据比例设置目标尺寸
+    if crop_ratio == "1:1":
+        TARGET_W, TARGET_H = 1600, 1600
+        TARGET_RATIO = 1.0
+    else:
+        TARGET_W, TARGET_H = 1200, 1600
+        TARGET_RATIO = TARGET_W / TARGET_H
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -162,13 +290,18 @@ def main():
     emit("log", msg=f"共找到 {total} 张图片，开始处理...")
     if auto_level:
         emit("log", msg="已启用水平矫正")
+    if knee_foot_mode:
+        emit("log", msg="已启用膝盖到脚模式")
 
     model_path = get_model_path()
+    # 膝盖到脚模式降低置信度，因为可能只拍了下半身
+    confidence = 0.5 if knee_foot_mode else 0.5
     options = mp.tasks.vision.PoseLandmarkerOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
         running_mode=mp.tasks.vision.RunningMode.IMAGE,
         num_poses=1,
-        min_pose_detection_confidence=0.5,
+        min_pose_detection_confidence=confidence,
+        min_pose_presence_confidence=confidence,
     )
 
     success_count = 0
@@ -215,16 +348,43 @@ def main():
                                 lms = result2.pose_landmarks[0]
 
                     img_w, img_h = img.size
-                    xs = [lm.x for lm in lms]
-                    ys = [lm.y for lm in lms]
-                    bbox = (min(xs), min(ys), max(xs), max(ys))
-                    crop_box = compute_crop_box(img_w, img_h, bbox,
-                                               pad_top, pad_bottom, pad_left, pad_right)
-                    status_parts.insert(0, "✓ 检测到人体")
+                    if knee_foot_mode:
+                        crop_box = compute_knee_foot_crop(img_w, img_h, lms,
+                                                         pad_top, pad_bottom, pad_left, pad_right)
+                        status_parts.insert(0, "✓ 检测到人体 [膝盖到脚]")
+                        # 预览模式：发送裁剪框给 GUI，等待用户确认
+                        if RESPONSE_FILE:
+                            adjusted = request_preview(filepath, crop_box, img_w, img_h)
+                            if adjusted is None:
+                                status_parts.append("已跳过")
+                                emit("progress", current=i, total=total, filename=filename,
+                                     status=" | ".join(status_parts))
+                                continue
+                            crop_box = adjusted
+                    else:
+                        xs = [lm.x for lm in lms]
+                        ys = [lm.y for lm in lms]
+                        bbox = (min(xs), min(ys), max(xs), max(ys))
+                        crop_box = compute_crop_box(img_w, img_h, bbox,
+                                                   pad_top, pad_bottom, pad_left, pad_right)
+                        status_parts.insert(0, "✓ 检测到人体")
                 else:
                     img_w, img_h = img.size
-                    crop_box = fallback_center_crop(img_w, img_h)
-                    status_parts.append("✗ 未检测到人体，居中裁剪")
+                    if knee_foot_mode:
+                        crop_box = fallback_lower_crop(img_w, img_h)
+                        status_parts.append("✗ 未检测到人体，居中裁剪")
+                        if RESPONSE_FILE:
+                            adjusted = request_preview(filepath, crop_box, img_w, img_h)
+                            if adjusted is None:
+                                status_parts.append("已跳过")
+                                emit("progress", current=i, total=total, filename=filename,
+                                     status=" | ".join(status_parts))
+                                fallback_count += 1
+                                continue
+                            crop_box = adjusted
+                    else:
+                        crop_box = fallback_center_crop(img_w, img_h)
+                        status_parts.append("✗ 未检测到人体，居中裁剪")
                     fallback_count += 1
 
                 cropped = img.crop(crop_box)
