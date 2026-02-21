@@ -26,7 +26,7 @@ TARGET_RATIO = TARGET_W / TARGET_H
 
 LOG_FILE = sys.argv[1]
 
-# 水平矫正无需人体关键点，使用图像直线检测
+# 水平矫正：使用人体中轴线（头顶到双脚中点）判断垂直方向
 
 
 def get_model_path():
@@ -42,82 +42,30 @@ def emit(msg_type, **kwargs):
         f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
 
-def detect_tilt_angle(img_np):
+def compute_body_tilt(landmarks):
     """
-    使用 Canny 边缘检测 + Hough 直线检测图片倾斜角度。
-    分析接近水平和接近垂直的直线，取中位数作为倾斜角。
+    通过人体中轴线计算倾斜角度。
+    中轴线 = 头顶(0) 到 双脚中点((31+32)/2) 的连线。
+    站立时这条线应该是垂直的（90度），偏差即为倾斜角。
     """
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    # landmark 0 = 鼻子（头部代表）
+    # landmark 31 = 左脚尖, 32 = 右脚尖
+    nose = landmarks[0]
+    l_foot = landmarks[31]
+    r_foot = landmarks[32]
 
-    # 缩小图片加速处理
-    h, w = gray.shape
-    scale = min(1.0, 1000.0 / max(h, w))
-    if scale < 1.0:
-        gray = cv2.resize(gray, (int(w * scale), int(h * scale)))
+    # 双脚中点
+    foot_x = (l_foot.x + r_foot.x) / 2
+    foot_y = (l_foot.y + r_foot.y) / 2
 
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    lines = cv2.HoughLinesP(edges, 1, math.pi / 180, threshold=100,
-                            minLineLength=int(min(gray.shape) * 0.1),
-                            maxLineGap=10)
+    dx = nose.x - foot_x
+    dy = nose.y - foot_y  # 注意 y 轴向下
 
-    if lines is None or len(lines) == 0:
-        emit("log", msg=f"    直线检测: 未找到直线")
-        return 0.0
+    # 中轴线角度（相对于垂直方向的偏差）
+    # 垂直线 = -90度（y轴向下时头在上方）
+    axis_angle = math.degrees(math.atan2(dx, -dy))  # 相对于垂直方向的偏移
 
-    h_angles = []  # 水平线
-    v_angles = []  # 垂直线
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        dx = x2 - x1
-        dy = y2 - y1
-        length = math.sqrt(dx * dx + dy * dy)
-        if length < 20:
-            continue
-        angle = math.degrees(math.atan2(dy, dx))
-
-        # 接近水平的线
-        if abs(angle) < 15:
-            h_angles.append((angle, length))
-        elif abs(angle) > 165:
-            a = angle - 180 if angle > 0 else angle + 180
-            h_angles.append((a, length))
-        # 接近垂直的线
-        elif 75 < abs(angle) < 105:
-            a = angle - 90 if angle > 0 else angle + 90
-            v_angles.append((a, length))
-
-    angles = h_angles + v_angles
-
-    emit("log", msg=f"    直线检测: 共 {len(lines)} 条, 水平参考 {len(h_angles)} 条, 垂直参考 {len(v_angles)} 条")
-
-    if h_angles:
-        top3_h = sorted(h_angles, key=lambda x: -x[1])[:3]
-        for a, l in top3_h:
-            emit("log", msg=f"      水平线: {a:+.2f}° (长度 {l:.0f}px)")
-    if v_angles:
-        top3_v = sorted(v_angles, key=lambda x: -x[1])[:3]
-        for a, l in top3_v:
-            emit("log", msg=f"      垂直线: {a:+.2f}° (长度 {l:.0f}px)")
-
-    if not angles:
-        emit("log", msg=f"    结论: 无有效参考线，跳过矫正")
-        return 0.0
-
-    # 按线段长度加权，取加权中位数
-    angles.sort(key=lambda x: x[0])
-    total_weight = sum(l for _, l in angles)
-    cumsum = 0
-    result = angles[0][0]
-    for a, l in angles:
-        cumsum += l
-        if cumsum >= total_weight / 2:
-            result = a
-            break
-
-    emit("log", msg=f"    结论: 倾斜 {result:+.2f}°")
-    return result
-
-
+    return axis_angle
 def level_image(img, angle):
     """旋转图片，用边缘像素填充"""
     img_np = np.array(img)
@@ -247,15 +195,16 @@ def main():
                     lms = result.pose_landmarks[0]
                     detect_count += 1
 
-                    # 水平矫正（基于图像直线检测，不依赖人体关键点）
+                    # 水平矫正（基于人体中轴线）
                     if auto_level:
-                        angle = detect_tilt_angle(img_np)
-                        if abs(angle) > 0.3:
+                        angle = compute_body_tilt(lms)
+                        emit("log", msg=f"    中轴线偏移: {angle:+.2f}°")
+                        if abs(angle) > 0.5:
                             img = level_image(img, angle)
                             status_parts.append(f"矫正 {angle:.1f}°")
                             emit("log", msg=f"    -> 已旋转 {angle:.2f}°")
                         else:
-                            emit("log", msg=f"    -> 倾斜 {angle:.2f}°，无需矫正")
+                            emit("log", msg=f"    -> 偏移 {angle:.2f}°，无需矫正")
                             leveled_count += 1
                             # 矫正后重新检测
                             img_rgb = img.convert("RGB")

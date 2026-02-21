@@ -1,22 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
+
+# 收集 mediapipe 的所有文件（包括 C 绑定、模型等）
+mp_datas, mp_binaries, mp_hiddenimports = collect_all('mediapipe')
+
+# 收集 opencv 的所有文件
+cv2_datas, cv2_binaries, cv2_hiddenimports = collect_all('cv2')
 
 a = Analysis(
     ['crop_portrait_gui.py'],
     pathex=[],
-    binaries=[],
-    datas=[('pose_landmarker.task', '.'), ('crop_worker.py', '.')],
+    binaries=mp_binaries + cv2_binaries,
+    datas=[
+        ('pose_landmarker.task', '.'),
+        ('crop_worker.py', '.'),
+    ] + mp_datas + cv2_datas,
     hiddenimports=[
         'crop_worker',
-        'mediapipe',
-        'mediapipe.tasks',
-        'mediapipe.tasks.python',
-        'mediapipe.tasks.python.vision',
         'PIL._tkinter_finder',
-        'cv2',
         'numpy',
-    ],
+    ] + mp_hiddenimports + cv2_hiddenimports + collect_submodules('mediapipe'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -38,12 +43,7 @@ exe = EXE(
     [],
     name='autoCut',
     debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
+    bootloader_ign
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
